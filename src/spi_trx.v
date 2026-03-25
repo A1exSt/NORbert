@@ -60,7 +60,15 @@ module spi_trx(
     input wire [7:0] sfdp_rdata,
     
     output reg log_strobe = 0,
-    output reg [7:0] log_val = 0
+    output reg [7:0] log_val = 0,
+    
+    // Structured logging outputs (directly driven from SPI state machine).
+    // All signals are in the SPI clock domain; the logger module synchronizes.
+    output reg log_cmd_valid = 0,       // Pulse: command byte decoded
+    output reg [7:0] log_cmd_opcode = 0,// The opcode that was decoded
+    output reg log_addr_valid = 0,      // Pulse: address phase complete
+    output reg [31:0] log_addr_out = 0, // Full flash byte address
+    output reg [23:0] log_byte_count = 0// Running count of bytes read in current transaction
 );
 
     wire is_selected = !spi_reset && !spi_csel;
@@ -215,6 +223,9 @@ module spi_trx(
                 
                 log_strobe <= 0;
                 log_val <= 0;
+                log_cmd_valid <= 0;
+                log_addr_valid <= 0;
+                log_byte_count <= 0;
                 
                 ram_inhibit_refresh <= 0;
                 ram_activate <= 0;
@@ -234,6 +245,8 @@ module spi_trx(
             end
             else begin
                 log_strobe <= 0;
+                log_cmd_valid <= 0;
+                log_addr_valid <= 0;
                     
                 write_buf_strobe <= 0;
                 
@@ -406,6 +419,9 @@ module spi_trx(
                     
                     log_strobe <= 1;
                     log_val <= {mosi_byte[7:1], spi_io0_in};
+                    log_cmd_valid <= 1;
+                    log_cmd_opcode <= {mosi_byte[7:1], spi_io0_in};
+                    log_byte_count <= 0;
                 end
                 else if ((state == STA_READSTATUS) && (bit_count_in == 0)) begin
                     miso_byte <= status_reg;
@@ -431,6 +447,10 @@ module spi_trx(
                     end
                     
                     if (addr_count == 0) begin
+                        log_addr_valid <= 1;
+                        log_addr_out <= addr;
+                        log_addr_out[0] <= spi_io0_in;
+                        
                         if (!is_sfdp_read) begin
                             ram_inhibit_refresh <= 0;
                             ram_activate <= 0;
@@ -522,6 +542,7 @@ module spi_trx(
                     if (bit_count_in == 0) begin
                         miso_byte <= ram_read_buffer[(addr[2:0]+1)*8 +: 8];
                         addr <= addr + 1;
+                        log_byte_count <= log_byte_count + 1;
                     end
                     
                     if (fresh_read) 
@@ -539,6 +560,10 @@ module spi_trx(
                 end
                 else if (state == STA_ADDR_ERASE) begin
                     if (addr_count == 0) begin
+                        log_addr_valid <= 1;
+                        log_addr_out <= addr;
+                        log_addr_out[0] <= spi_io0_in;
+                        
                         state <= STA_ERASE;
                         write_cmd <= 1;
                         write_type <= 1'd1;
@@ -566,6 +591,10 @@ module spi_trx(
                 end
                 else if (state == STA_ADDR_WRITE) begin
                     if (addr_count == 0) begin
+                        log_addr_valid <= 1;
+                        log_addr_out <= addr;
+                        log_addr_out[0] <= spi_io0_in;
+                        
                         state <= STA_WRITE;
                         write_cmd <= 1;
                         write_type <= 0;
@@ -626,6 +655,11 @@ module spi_trx(
                     
                     // Transition when last 2 bits received (addr_count was 1)
                     if (addr_count == 1) begin
+                        log_addr_valid <= 1;
+                        log_addr_out <= addr;
+                        log_addr_out[1] <= spi_io1_in;
+                        log_addr_out[0] <= spi_io0_in;
+                        
                         // Enter mode+dummy phase (4 dual clocks for 0xBB)
                         state <= STA_MODE_MULTI;
                         mode_count <= 3;
@@ -738,6 +772,7 @@ module spi_trx(
                         else
                             miso_byte <= ram_read_buffer[(addr[2:0]+1)*8 +: 8];
                         addr <= addr + 1;
+                        log_byte_count <= log_byte_count + 1;
                     end
                     
                     if (fresh_read)
@@ -773,6 +808,13 @@ module spi_trx(
                     
                     // Transition when last 4 bits received (addr_count was 3)
                     if (addr_count == 3) begin
+                        log_addr_valid <= 1;
+                        log_addr_out <= addr;
+                        log_addr_out[3] <= spi_io3_in;
+                        log_addr_out[2] <= spi_io2_in;
+                        log_addr_out[1] <= spi_io1_in;
+                        log_addr_out[0] <= spi_io0_in;
+                        
                         // Enter mode+dummy phase (6 quad clocks: 2 mode + 4 dummy)
                         state <= STA_MODE_MULTI;
                         mode_count <= 5;
@@ -833,6 +875,7 @@ module spi_trx(
                         else
                             miso_byte <= ram_read_buffer[(addr[2:0]+1)*8 +: 8];
                         addr <= addr + 1;
+                        log_byte_count <= log_byte_count + 1;
                     end
                     
                     if (fresh_read)
@@ -856,6 +899,7 @@ module spi_trx(
                     else if (bit_count_in == 0) begin
                         miso_byte <= sfdp_rdata;
                         addr <= addr + 1;
+                        log_byte_count <= log_byte_count + 1;
                     end
                 end
                 else if (state == STA_WRITESTATUS && bit_count_in == 0) begin
