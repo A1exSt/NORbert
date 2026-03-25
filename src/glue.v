@@ -68,6 +68,9 @@ module glue(
     input wire [6:0] sfdp_raddr,
     output wire [7:0] sfdp_rdata,
     
+    // Target flash HOLD control (active high: 1 = assert #HOLD on target)
+    output reg hold_out,
+    
     output reg [7:0] led
 );
 
@@ -77,7 +80,8 @@ module glue(
         CMD_VERSION      = 8'h30,
         CMD_RAMREAD      = 8'h31,
         CMD_RAMWRITE     = 8'h32,
-        CMD_CHIPCONFIG   = 8'h33;
+        CMD_CHIPCONFIG   = 8'h33,
+        CMD_HOLDCTL      = 8'h34;
 
     localparam VERSION = 8'h03;  // Version 3: 16-bit burst length
 
@@ -233,6 +237,8 @@ module glue(
             
             write_buffer <= 0;
             
+            hold_out <= 0;
+            
             cfg_jedec_id <= {8'h17, 8'h40, 8'hEF};  // Default: W25Q64FV (EF 40 17)
             cfg_4byte <= 0;
             cfg_chip_erase_bursts <= 23'h0FFFFF;     // 8MB = 1M bursts - 1
@@ -328,6 +334,7 @@ module glue(
             led[5] <= spi_writing;
             led[4] <= spi_reset;
             led[3] <= !spi_csel_buf[1];
+            led[2] <= hold_out;                         // Target flash held
             led[0] <= heartbeat[25];                    // Heartbeat ~2Hz at 132MHz
             
             // Log strobe handling -- only forward to UART (active_port=0).
@@ -459,6 +466,10 @@ module glue(
                             cmd <= CMD_CHIPCONFIG;
                             in_count <= 1;
                         end
+                        else if (rxd_data_buf == CMD_HOLDCTL) begin
+                            cmd <= CMD_HOLDCTL;
+                            in_count <= 1;
+                        end
                     end
                     else if (cmd == CMD_CHIPCONFIG) begin
                         // -----------------------------------------------
@@ -520,6 +531,23 @@ module glue(
                         else begin
                             in_count <= in_count + 1;
                         end
+                    end
+                    else if (cmd == CMD_HOLDCTL) begin
+                        // -----------------------------------------------
+                        // HOLDCTL protocol:
+                        //   Byte 1: 0x01 = assert #HOLD (silence target flash)
+                        //           0x00 = release #HOLD (target flash active)
+                        // Response: 0x01
+                        //
+                        // Mutually exclusive with quad I/O: when hold is
+                        // asserted, IO3 is driven low continuously to keep
+                        // the target flash in hold state.
+                        // -----------------------------------------------
+                        hold_out <= rxd_data_buf[0];
+                        txd_strobe_buf <= 1;
+                        txd_data_buf <= 8'h01;
+                        in_count <= 0;
+                        cmd <= CMD_NOP;
                     end
                     else begin
                         // RAMREAD / RAMWRITE handling (v3: 6-byte header)

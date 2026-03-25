@@ -35,6 +35,7 @@ const CMD_VERSION: u8 = 0x30;
 const CMD_READ: u8 = 0x31;
 const CMD_WRITE: u8 = 0x32;
 const CMD_CHIPCONFIG: u8 = 0x33;
+const CMD_HOLDCTL: u8 = 0x34;
 
 // FT2232H USB identifiers
 #[cfg(any(feature = "d2xx", feature = "ftdi"))]
@@ -487,6 +488,39 @@ impl FlashDevice {
         Ok(())
     }
 
+    /// Control the target flash #HOLD pin.
+    ///
+    /// When enabled, IO3 is driven LOW continuously, asserting #HOLD on
+    /// the target flash and silencing it so NORbert can respond instead.
+    /// Mutually exclusive with quad I/O.
+    ///
+    /// Protocol (CMD_HOLDCTL = 0x34):
+    ///   Byte 0: 0x34
+    ///   Byte 1: 0x01 = assert hold, 0x00 = release hold
+    ///   Response: 0x01 on success.
+    fn set_hold(&mut self, enable: bool) -> Result<()> {
+        let data = if enable { 0x01u8 } else { 0x00u8 };
+        self.transport.write_all(&[CMD_HOLDCTL, data])?;
+
+        // Wait for ack (skip modem status bytes, see write_block)
+        let mut resp = [0u8; 1];
+        let mut skipped = 0u32;
+        loop {
+            self.transport.read_exact(&mut resp)?;
+            if resp[0] != 0x00 {
+                break;
+            }
+            skipped += 1;
+            if skipped > 8 {
+                bail!("Hold control: too many 0x00 bytes before ACK");
+            }
+        }
+        if resp[0] != 0x01 {
+            bail!("Hold control failed: unexpected response 0x{:02x}", resp[0]);
+        }
+        Ok(())
+    }
+
     #[allow(dead_code)]
     fn write(&mut self, address: u32, data: &[u8]) -> Result<()> {
         if address % 8 != 0 {
@@ -612,6 +646,17 @@ enum Commands {
         /// Chip name to emulate (substring match, e.g. "W25Q128.V")
         #[arg(short, long)]
         chip: String,
+    },
+
+    /// Control target flash #HOLD pin for SPI bus sharing
+    ///
+    /// Asserts #HOLD on the existing SPI flash so NORbert can respond
+    /// instead.  The target flash tristates its outputs and ignores
+    /// all SPI commands while held.  Mutually exclusive with quad I/O.
+    Hold {
+        /// "on" to assert #HOLD (silence target flash),
+        /// "off" to release (target flash active)
+        state: String,
     },
 
     /// List available serial ports
@@ -1300,6 +1345,22 @@ fn cmd_ft_list() -> Result<()> {
     bail!("ft-list requires the 'd2xx' or 'ftdi' feature");
 }
 
+fn cmd_hold(cli: &Cli, state: &str) -> Result<()> {
+    let enable = match state.to_lowercase().as_str() {
+        "on" | "assert" | "1" => true,
+        "off" | "release" | "0" => false,
+        _ => bail!("Invalid hold state '{}': use 'on' or 'off'", state),
+    };
+    let mut device = open_device(cli)?;
+    device.set_hold(enable)?;
+    if enable {
+        eprintln!("HOLD asserted: target flash silenced");
+    } else {
+        eprintln!("HOLD released: target flash active");
+    }
+    Ok(())
+}
+
 fn cmd_ports() -> Result<()> {
     let ports = serialport::available_ports()?;
     if ports.is_empty() {
@@ -1353,6 +1414,7 @@ fn main() -> Result<()> {
             length,
         } => cmd_dump(&cli, file, *address, *length),
         Commands::Configure { chip_db, chip } => cmd_configure(&cli, chip_db, chip),
+        Commands::Hold { state } => cmd_hold(&cli, state),
         Commands::Ports => cmd_ports(),
         Commands::FtList => cmd_ft_list(),
         Commands::Probe => cmd_probe(&cli),
